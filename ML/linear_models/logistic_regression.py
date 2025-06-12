@@ -12,9 +12,9 @@ class MyLogReg:
                  reg=None,
                  l1_coef=0,
                  l2_coef=0,
-                 sgd_sample=None,  # integer or float for batch sampling
+                 sgd_sample=None,  # integer (batch size) or float (fraction of data)
                  random_state=42):
-        # Initialize hyperparameters and attributes
+        # Initialize hyperparameters and internal state
         self.n_iter = n_iter
         self.learning_rate = learning_rate
         self.weights = weights
@@ -32,45 +32,53 @@ class MyLogReg:
     def fit(self, X, y, verbose=False):
         random.seed(self.random_state)
 
-        # Convert input dataframes to numpy arrays
+        # Convert DataFrame to NumPy arrays
         X = X.to_numpy()
         y = y.to_numpy()
 
-        # Add bias term (column of 1s)
+        # Add bias term (intercept) as the first column of 1s
         X = np.concatenate([np.ones((X.shape[0], 1)), X], axis=1)
         
+        # Initialize weights if not already provided
         if self.weights is None:
             self.weights = np.ones(X.shape[1])
 
         for i in range(1, self.n_iter + 1):
+            # Get batch of data (for SGD or full batch)
             X_batch, y_batch = self.get_batches(X, y)
 
-            # Compute predictions and loss
+            # Compute predictions using sigmoid activation
             y_pred_batch = 1 / (1 + np.exp(-np.dot(X_batch, self.weights)))
-            log_loss = -np.mean(y_batch * np.log(y_pred_batch + 1e-15) + (1 - y_batch) * np.log(1 - y_pred_batch + 1e-15))
+            y_pred_batch = np.clip(y_pred_batch, 1e-15, 1 - 1e-15)
 
-            # Compute gradient of the loss
+            # Compute log loss with numerical stability
+            log_loss = -np.mean(y_batch * np.log(y_pred_batch + 1e-15) + 
+                                (1 - y_batch) * np.log(1 - y_pred_batch + 1e-15))
+
+            # Compute gradient of the log loss
             grad = 1 / X_batch.shape[0] * np.dot((y_pred_batch - y_batch), X_batch)
 
-            # Apply regularization to loss and gradient
+            # Add regularization penalties
             if self.reg == 'l1':
                 log_loss += self.l1_coef * np.sum(np.abs(self.weights))
                 grad += self.l1_coef * np.sign(self.weights)
             elif self.reg == 'l2':
-                log_loss += self.l2_coef * np.sum((self.weights) ** 2)
+                log_loss += self.l2_coef * np.sum(self.weights ** 2)
                 grad += self.l2_coef * 2 * self.weights
             elif self.reg == 'elasticnet':
-                log_loss += self.l1_coef * np.sum(np.abs(self.weights)) + self.l2_coef * np.sum((self.weights) ** 2)
-                grad += self.l1_coef * np.sign(self.weights) + self.l2_coef * 2 * self.weights
+                log_loss += (self.l1_coef * np.sum(np.abs(self.weights)) +
+                             self.l2_coef * np.sum(self.weights ** 2))
+                grad += (self.l1_coef * np.sign(self.weights) +
+                         self.l2_coef * 2 * self.weights)
 
-            # Update weights using gradient descent
+            # Update weights with learning rate
             self.weights = self.weights - self.calc_lr(i) * grad
 
-            # Compute evaluation metric if specified
+            # Evaluate performance on full dataset if metric is provided
             if self.metric:
                 self.best_score = self.calculate_metric(X, y)
 
-            # Logging if verbose is set
+            # Logging
             if verbose and i % verbose == 0:
                 if self.metric is None:
                     print(f"{i} | loss: {log_loss}")
@@ -78,11 +86,11 @@ class MyLogReg:
                     print(f"{i} | loss: {log_loss} | {self.metric}: {self.best_score}")
     
     def get_batches(self, X, y):
-        # Return full dataset if no SGD sampling specified
+        # Return full batch if no sampling requested
         if self.sgd_sample is None or self.sgd_sample >= X.shape[0]:
             return X, y
         else:
-            # Determine sample size for SGD
+            # Compute sample size for mini-batch SGD
             if isinstance(self.sgd_sample, int):
                 sample_size = self.sgd_sample
             elif isinstance(self.sgd_sample, float):
@@ -92,38 +100,37 @@ class MyLogReg:
             return X[sample_rows_idx], y[sample_rows_idx]
 
     def calc_lr(self, iter):
-        # Support for dynamic or constant learning rate
+        # Support dynamic or constant learning rate
         if callable(self.learning_rate):
             try:
                 return self.learning_rate(iter)
             except TypeError:
-                return self.learning_rate
+                return self.learning_rate  # fallback if callable fails
         return self.learning_rate
     
     def predict_proba(self, X):
-        # Convert X to numpy array if it's a DataFrame
+        # Ensure input is NumPy and includes bias term
         if isinstance(X, pd.DataFrame):
             X = X.to_numpy()
         
-        # Check if X shape matches the expected input
         if X.shape[1] != self.weights.shape[0]:
             X = np.concatenate([np.ones((X.shape[0], 1)), X], axis=1)
         
-        return (1 / (1 + np.exp(-np.dot(X, self.weights))))
+        return 1 / (1 + np.exp(-np.dot(X, self.weights)))
     
     def predict(self, X):
+        # Convert predicted probabilities to binary class
         prob_arr = self.predict_proba(X)
-
-        binary = (prob_arr > 0.5).astype(int)
-        return binary
+        return (prob_arr > 0.5).astype(int)
 
     def get_best_score(self):
         return self.best_score
 
     def calculate_metric(self, X, y):
-        # Compute chosen evaluation metric
+        # Evaluate using the specified metric
         if self.metric is None:
             raise ValueError("No metric specified for calculation.")
+        
         if self.metric == "accuracy":
             return self.accuracy(X, y)  
         elif self.metric == "precision":
@@ -138,19 +145,19 @@ class MyLogReg:
             raise ValueError(f"Unknown metric: {self.metric}")
 
     def get_coef(self):
-        # Return weights without bias term
+        # Return weights (excluding bias term)
         return self.weights[1:]
 
     # =========================
     # Metric Implementations
     # =========================
     def _get_confusion_matrix(self, X, y):
+        # Binary prediction for confusion matrix calculation
         y_pred_bin = self.predict(X)
         tp = sum((y_pred_bin == 1) & (y == 1))
         tn = sum((y_pred_bin == 0) & (y == 0))
         fp = sum((y_pred_bin == 1) & (y == 0))
         fn = sum((y_pred_bin == 0) & (y == 1))
-
         return tp, tn, fp, fn
     
     def accuracy(self, X, y):
@@ -159,40 +166,28 @@ class MyLogReg:
 
     def precision(self, X, y):
         tp, tn, fp, fn = self._get_confusion_matrix(X, y)
-        return tp / (tp + fp)
-    
+        return tp / (tp + fp + 1e-15)
+
     def recall(self, X, y):
         tp, tn, fp, fn = self._get_confusion_matrix(X, y)
-        return tp / (tp + fn)
+        return tp / (tp + fn + 1e-15)
 
     def f1(self, X, y):
-        tp, tn, fp, fn = self._get_confusion_matrix(X, y)
         prec = self.precision(X, y)
         rec = self.recall(X, y)
-        return 2 * prec * rec / (prec + rec + 1e-15)  # Adding small constant to avoid division by zero
+        return 2 * prec * rec / (prec + rec + 1e-15)
 
     def roc_auc(self, X, y):
         y_pred_prob = self.predict_proba(X)
         y = y.to_numpy() if isinstance(y, pd.Series) else y
         
-        # Create a DataFrame of predictions and labels
         df = pd.DataFrame({'prob': y_pred_prob, 'label': y})
-        
-        # Rank the predictions
         df['rank'] = df['prob'].rank(method='average', ascending=True)
         
-        # Sum of ranks for positive class
         sum_ranks_pos = df[df['label'] == 1]['rank'].sum()
-        
         P = sum(y == 1)
         N = sum(y == 0)
 
-        # AUC formula based on ranks
+        # Rank-based AUC computation
         auc = (sum_ranks_pos - (P * (P + 1)) / 2) / (P * N)
         return auc
-
-
-
-
-
-        
